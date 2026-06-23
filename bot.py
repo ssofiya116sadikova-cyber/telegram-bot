@@ -96,6 +96,36 @@ def save_telegram_id(name, telegram_id):
 
 # === КОМАНДЫ БОТА ===
 
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != MANAGER_ID:
+        await update.message.reply_text("Эта команда только для руководителя.")
+        return
+    if not context.args:
+        await update.message.reply_text("Напиши: /vsem Текст сообщения")
+        return
+    text = " ".join(context.args)
+    sent = 0
+    failed = 0
+    for sheet_name, sheet in get_all_employee_sheets():
+        try:
+            rows = sheet.get_all_records()
+            tid = ""
+            for row in rows:
+                t = str(row.get("Telegram ID", "")).strip()
+                if t:
+                    tid = t
+                    break
+            if tid:
+                await context.bot.send_message(chat_id=int(tid), text=f"📢 {text}")
+                sent += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+    await update.message.reply_text(f"Отправлено: {sent} чел. Не доставлено: {failed} (не зарегистрированы).")
+
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     telegram_id = user.id
@@ -415,6 +445,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("zadachi", tasks_command))
     app.add_handler(CommandHandler("moe_imya", set_name))
+    app.add_handler(CommandHandler("vsem", broadcast))
     app.add_handler(CallbackQueryHandler(button_callback))
 
     job_queue = app.job_queue
