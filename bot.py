@@ -86,7 +86,7 @@ def save_telegram_id(code, telegram_id):
             updated = False
             for i, row in enumerate(rows, start=2):
                 employee = str(row.get("Сотрудник", "")).strip().lower()
-                if employee == code.lower() or not employee:
+                if employee == code.lower():
                     sheet.update_cell(i, telegram_id_col, str(telegram_id))
                     updated = True
             return updated
