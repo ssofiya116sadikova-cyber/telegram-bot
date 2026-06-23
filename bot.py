@@ -5,8 +5,8 @@ import json
 import base64
 import tempfile
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -126,6 +126,11 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton("📋 Мои задачи"), KeyboardButton("✍️ Вопрос по задаче")]],
+    resize_keyboard=True
+)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     telegram_id = user.id
@@ -139,13 +144,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Привет, {user.first_name}! 👋\n\n"
             "Сюда будут приходить твои рабочие задачи и напоминалки о дедлайнах.\n\n"
             "📌 Инструкция:\n\n"
-            "1️⃣ Зарегистрируйся — напиши своё имя так, как оно записано у @ratmila:\n"
-            "/moe_imya Имя Фамилия\n\n"
-            "2️⃣ Посмотри свои задачи:\n"
-            "/zadachi\n\n"
-            "3️⃣ Когда выполнишь задачу — нажми кнопку ✅ под ней. Рук сразу увидит это в таблице.\n\n"
+            "1️⃣ Зарегистрируйся — напиши свой код (выдала @ratmila):\n"
+            "/moe_imya КодСотрудника\n\n"
+            "2️⃣ Посмотри свои задачи — нажми кнопку 📋 внизу\n\n"
+            "3️⃣ Когда выполнишь задачу — нажми кнопку ✅ под ней.\n\n"
             "🔔 Напоминания приходят автоматически — за 24 часа и за 1 час до дедлайна.\n\n"
-            "Если возникнут вопросы — обращайся к Софии."
+            "Если есть вопрос — нажми ✍️ Вопрос по задаче.",
+            reply_markup=MAIN_KEYBOARD
         )
 
 async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -164,6 +169,29 @@ async def set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"Не нашёл сотрудника с именем '{name}' в таблице.\n"
             "Проверь написание или обратись к руководителю."
+        )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user = update.effective_user
+
+    if text == "📋 Мои задачи":
+        await tasks_command(update, context)
+    elif text == "✍️ Вопрос по задаче":
+        context.user_data["waiting_question"] = True
+        await update.message.reply_text(
+            "Напиши свой вопрос — я передам его руководителю:",
+            reply_markup=MAIN_KEYBOARD
+        )
+    elif context.user_data.get("waiting_question"):
+        context.user_data["waiting_question"] = False
+        await context.bot.send_message(
+            chat_id=MANAGER_ID,
+            text=f"✍️ Вопрос от {user.first_name}:\n\n{text}"
+        )
+        await update.message.reply_text(
+            "Вопрос отправлен руководителю ✅",
+            reply_markup=MAIN_KEYBOARD
         )
 
 async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -447,6 +475,7 @@ def main():
     app.add_handler(CommandHandler("moe_imya", set_name))
     app.add_handler(CommandHandler("vsem", broadcast))
     app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     job_queue = app.job_queue
     job_queue.run_repeating(send_reminders, interval=1800, first=10)
