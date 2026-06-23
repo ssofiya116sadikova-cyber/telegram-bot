@@ -20,7 +20,9 @@ CREDENTIALS_FILE = "/Users/sofiasadykova/telegram_bot/credentials.json"
 MANAGER_ID = 6691703913  # Telegram ID руководителя (София)
 
 # Подключение к Google Sheets
-def get_sheet():
+EMPLOYEE_SHEETS = ["Ратмила", "Елизавета", "Софа", "Настя", "София", "Карина", "Алиса"]
+
+def get_gspread_client():
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive"
@@ -32,38 +34,65 @@ def get_sheet():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     else:
         creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
-    client = gspread.authorize(creds)
-    return client.open(SHEET_NAME).sheet1
+    return gspread.authorize(creds)
 
-# Получить задачи сотрудника по Telegram ID
+def get_sheet(tab_name=None):
+    client = get_gspread_client()
+    spreadsheet = client.open(SHEET_NAME)
+    if tab_name:
+        return spreadsheet.worksheet(tab_name)
+    return spreadsheet.sheet1
+
+def get_all_employee_sheets():
+    client = get_gspread_client()
+    spreadsheet = client.open(SHEET_NAME)
+    sheets = []
+    for name in EMPLOYEE_SHEETS:
+        try:
+            sheets.append((name, spreadsheet.worksheet(name)))
+        except Exception:
+            pass
+    return sheets
+
+# Получить задачи сотрудника по Telegram ID (ищет по всем вкладкам)
 def get_tasks_for_user(telegram_id):
-    sheet = get_sheet()
-    rows = sheet.get_all_records()
     tasks = []
-    for i, row in enumerate(rows, start=2):
-        if str(row.get("Telegram ID", "")) == str(telegram_id):
-            tasks.append({"row": i, **row})
+    for name, sheet in get_all_employee_sheets():
+        rows = sheet.get_all_records()
+        for i, row in enumerate(rows, start=2):
+            if str(row.get("Telegram ID", "")) == str(telegram_id):
+                tasks.append({"row": i, "sheet_name": name, **row})
     return tasks
 
 # Отметить задачу выполненной
-def mark_task_done(row_number):
-    sheet = get_sheet()
+def mark_task_done(row_number, sheet_name=None):
+    sheet = get_sheet(sheet_name)
     headers = sheet.row_values(1)
     status_col = headers.index("Статус") + 1
     sheet.update_cell(row_number, status_col, "Выполнено")
 
 # Сохранить Telegram ID пользователя в таблицу
 def save_telegram_id(name, telegram_id):
-    sheet = get_sheet()
-    rows = sheet.get_all_records()
-    headers = sheet.row_values(1)
-    telegram_id_col = headers.index("Telegram ID") + 1
-    for i, row in enumerate(rows, start=2):
-        employee = str(row.get("Сотрудник", "")).strip().lower()
-        if employee == name.strip().lower() and not row.get("Telegram ID"):
-            sheet.update_cell(i, telegram_id_col, str(telegram_id))
+    try:
+        sheet = get_sheet(name)
+        rows = sheet.get_all_records()
+        headers = sheet.row_values(1)
+        telegram_id_col = headers.index("Telegram ID") + 1
+        # Записываем ID в первую строку с данными или создаём запись
+        if rows:
+            for i, row in enumerate(rows, start=2):
+                if not row.get("Telegram ID"):
+                    sheet.update_cell(i, telegram_id_col, str(telegram_id))
+                    return True
+            # Все строки уже имеют ID, обновим первую
+            sheet.update_cell(2, telegram_id_col, str(telegram_id))
             return True
-    return False
+        else:
+            # Пустая вкладка — добавим строку с ID
+            sheet.append_row([name, "", "", "", "", str(telegram_id), ""])
+            return True
+    except Exception:
+        return False
 
 # === КОМАНДЫ БОТА ===
 
@@ -132,14 +161,15 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE, tasks):
             status = task.get("Статус", "")
             status_icon = "🔄" if status == "В работе" else "🔴"
             text += f"{status_icon} {task['Задача']} — до {deadline}\n"
+            sn = task.get("sheet_name", "")
             keyboard.append([
                 InlineKeyboardButton(
                     f"🔄 В работе: {task['Задача'][:25]}",
-                    callback_data=f"inprogress_{task['row']}"
+                    callback_data=f"inprogress_{task['row']}_{sn}"
                 ),
                 InlineKeyboardButton(
                     f"✅ Готово",
-                    callback_data=f"done_{task['row']}"
+                    callback_data=f"done_{task['row']}_{sn}"
                 )
             ])
     else:
@@ -151,8 +181,8 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE, tasks):
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
 
-def mark_task_in_progress(row_number):
-    sheet = get_sheet()
+def mark_task_in_progress(row_number, sheet_name=None):
+    sheet = get_sheet(sheet_name)
     headers = sheet.row_values(1)
     status_col = headers.index("Статус") + 1
     sheet.update_cell(row_number, status_col, "В работе")
@@ -162,20 +192,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data.startswith("done_"):
-        row = int(query.data.split("_")[1])
-        sheet = get_sheet()
+        parts = query.data.split("_", 2)
+        row = int(parts[1])
+        sheet_name = parts[2] if len(parts) > 2 else None
+        sheet = get_sheet(sheet_name)
         task_name = sheet.cell(row, 3).value
-        mark_task_done(row)
+        mark_task_done(row, sheet_name)
         await query.edit_message_text("✅ Задача отмечена как выполненная! Молодец!")
         await context.bot.send_message(
             chat_id=MANAGER_ID,
             text=f"✅ Задача выполнена!\n\n📌 {task_name}\nСотрудник: {query.from_user.first_name}"
         )
     elif query.data.startswith("inprogress_"):
-        row = int(query.data.split("_")[1])
-        sheet = get_sheet()
+        parts = query.data.split("_", 2)
+        row = int(parts[1])
+        sheet_name = parts[2] if len(parts) > 2 else None
+        sheet = get_sheet(sheet_name)
         task_name = sheet.cell(row, 3).value
-        mark_task_in_progress(row)
+        mark_task_in_progress(row, sheet_name)
         await query.edit_message_text("🔄 Отлично! Задача отмечена как 'В работе'.")
         await context.bot.send_message(
             chat_id=MANAGER_ID,
@@ -186,50 +220,47 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def notify_new_tasks(context: ContextTypes.DEFAULT_TYPE):
     try:
-        sheet = get_sheet()
-        rows = sheet.get_all_records()
-        headers = sheet.row_values(1)
-        notified_col = headers.index("Уведомлено") + 1
-        telegram_id_col = headers.index("Telegram ID") + 1
-
-        # Собираем словарь имя -> telegram_id из всех строк где ID уже есть
-        name_to_id = {}
-        for row in rows:
-            name = str(row.get("Сотрудник", "")).strip()
-            tid = str(row.get("Telegram ID", "")).strip()
-            if name and tid:
-                name_to_id[name] = tid
-
-        for i, row in enumerate(rows, start=2):
-            name = str(row.get("Сотрудник", "")).strip()
-            task = str(row.get("Задача", "")).strip()
-            deadline = str(row.get("Дедлайн", "")).strip()
-            notified = str(row.get("Уведомлено", "")).strip()
-            telegram_id = str(row.get("Telegram ID", "")).strip()
-
-            if not task or notified == "Да":
-                continue
-
-            # Если ID нет — пробуем найти по имени
-            if not telegram_id and name in name_to_id:
-                telegram_id = name_to_id[name]
-                sheet.update_cell(i, telegram_id_col, telegram_id)
-
-            if not telegram_id:
-                continue
-
+        for sheet_name, sheet in get_all_employee_sheets():
             try:
-                await context.bot.send_message(
-                    chat_id=int(telegram_id),
-                    text=f"📬 *Новая задача!*\n\n"
-                         f"📌 {task}\n"
-                         f"⏰ Дедлайн: {deadline}\n\n"
-                         f"Напиши /zadachi чтобы увидеть все свои задачи.",
-                    parse_mode="Markdown"
-                )
-                sheet.update_cell(i, notified_col, "Да")
-            except Exception:
-                pass
+                rows = sheet.get_all_records()
+                headers = sheet.row_values(1)
+                notified_col = headers.index("Уведомлено") + 1
+                telegram_id_col = headers.index("Telegram ID") + 1
+
+                # Берём Telegram ID из любой строки где он есть
+                sheet_tid = ""
+                for row in rows:
+                    tid = str(row.get("Telegram ID", "")).strip()
+                    if tid:
+                        sheet_tid = tid
+                        break
+
+                for i, row in enumerate(rows, start=2):
+                    task = str(row.get("Задача", "")).strip()
+                    deadline = str(row.get("Дедлайн", "")).strip()
+                    notified = str(row.get("Уведомлено", "")).strip()
+                    telegram_id = str(row.get("Telegram ID", "")).strip() or sheet_tid
+
+                    if not task or notified == "Да" or not telegram_id:
+                        continue
+
+                    if not str(row.get("Telegram ID", "")).strip() and telegram_id:
+                        sheet.update_cell(i, telegram_id_col, telegram_id)
+
+                    try:
+                        await context.bot.send_message(
+                            chat_id=int(telegram_id),
+                            text=f"📬 *Новая задача!*\n\n"
+                                 f"📌 {task}\n"
+                                 f"⏰ Дедлайн: {deadline}\n\n"
+                                 f"Напиши /zadachi чтобы увидеть все свои задачи.",
+                            parse_mode="Markdown"
+                        )
+                        sheet.update_cell(i, notified_col, "Да")
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.error(f"Ошибка в вкладке {sheet_name}: {e}")
     except Exception as e:
         logger.error(f"Ошибка при уведомлении о новых задачах: {e}")
 
@@ -237,40 +268,49 @@ async def notify_new_tasks(context: ContextTypes.DEFAULT_TYPE):
 
 async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
     try:
-        sheet = get_sheet()
-        rows = sheet.get_all_records()
         now = datetime.now()
-
-        for i, row in enumerate(rows, start=2):
-            telegram_id = str(row.get("Telegram ID", "")).strip()
-            status = str(row.get("Статус", "")).strip()
-            deadline_str = str(row.get("Дедлайн", "")).strip()
-            task = str(row.get("Задача", "")).strip()
-
-            if not telegram_id or status == "Выполнено" or not deadline_str:
-                continue
-
+        for sheet_name, sheet in get_all_employee_sheets():
             try:
-                deadline = datetime.strptime(deadline_str, "%Y-%m-%d %H:%M")
-            except ValueError:
-                try:
-                    deadline = datetime.strptime(deadline_str, "%Y-%m-%d")
-                except ValueError:
-                    continue
+                rows = sheet.get_all_records()
+                sheet_tid = ""
+                for row in rows:
+                    tid = str(row.get("Telegram ID", "")).strip()
+                    if tid:
+                        sheet_tid = tid
+                        break
 
-            diff = deadline - now
-            if timedelta(hours=23) < diff <= timedelta(hours=24):
-                await context.bot.send_message(
-                    chat_id=int(telegram_id),
-                    text=f"⏰ Напоминание!\n\nЗавтра дедлайн по задаче:\n*{task}*\n\nДо: {deadline_str}",
-                    parse_mode="Markdown"
-                )
-            elif timedelta(minutes=50) < diff <= timedelta(hours=1):
-                await context.bot.send_message(
-                    chat_id=int(telegram_id),
-                    text=f"🔔 Через час дедлайн!\n\n*{task}*\n\nДо: {deadline_str}",
-                    parse_mode="Markdown"
-                )
+                for row in rows:
+                    telegram_id = str(row.get("Telegram ID", "")).strip() or sheet_tid
+                    status = str(row.get("Статус", "")).strip()
+                    deadline_str = str(row.get("Дедлайн", "")).strip()
+                    task = str(row.get("Задача", "")).strip()
+
+                    if not telegram_id or status == "Выполнено" or not deadline_str or not task:
+                        continue
+
+                    try:
+                        deadline = datetime.strptime(deadline_str, "%Y-%m-%d %H:%M")
+                    except ValueError:
+                        try:
+                            deadline = datetime.strptime(deadline_str, "%Y-%m-%d")
+                        except ValueError:
+                            continue
+
+                    diff = deadline - now
+                    if timedelta(hours=23) < diff <= timedelta(hours=24):
+                        await context.bot.send_message(
+                            chat_id=int(telegram_id),
+                            text=f"⏰ Напоминание!\n\nЗавтра дедлайн по задаче:\n*{task}*\n\nДо: {deadline_str}",
+                            parse_mode="Markdown"
+                        )
+                    elif timedelta(minutes=50) < diff <= timedelta(hours=1):
+                        await context.bot.send_message(
+                            chat_id=int(telegram_id),
+                            text=f"🔔 Через час дедлайн!\n\n*{task}*\n\nДо: {deadline_str}",
+                            parse_mode="Markdown"
+                        )
+            except Exception as e:
+                logger.error(f"Ошибка напоминания в вкладке {sheet_name}: {e}")
     except Exception as e:
         logger.error(f"Ошибка при отправке напоминаний: {e}")
 
@@ -278,15 +318,14 @@ async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
 
 async def daily_report(context: ContextTypes.DEFAULT_TYPE):
     try:
-        sheet = get_sheet()
-        rows = sheet.get_all_records()
         now = datetime.now()
-
         pending = []
         overdue = []
         done_today = []
 
-        for row in rows:
+        for sheet_name, sheet in get_all_employee_sheets():
+          rows = sheet.get_all_records()
+          for row in rows:
             status = str(row.get("Статус", "")).strip()
             task = str(row.get("Задача", "")).strip()
             employee = str(row.get("Сотрудник", "")).strip()
@@ -330,41 +369,41 @@ async def daily_report(context: ContextTypes.DEFAULT_TYPE):
 
 async def check_overdue(context: ContextTypes.DEFAULT_TYPE):
     try:
-        sheet = get_sheet()
-        rows = sheet.get_all_records()
-        headers = sheet.row_values(1)
         now = datetime.now()
-
-        for i, row in enumerate(rows, start=2):
-            status = str(row.get("Статус", "")).strip()
-            task = str(row.get("Задача", "")).strip()
-            employee = str(row.get("Сотрудник", "")).strip()
-            deadline_str = str(row.get("Дедлайн", "")).strip()
-            telegram_id = str(row.get("Telegram ID", "")).strip()
-
-            if status == "Выполнено" or status == "Просрочено" or not task or not deadline_str:
-                continue
-
+        for sheet_name, sheet in get_all_employee_sheets():
             try:
-                deadline = datetime.strptime(deadline_str, "%Y-%m-%d %H:%M")
-            except ValueError:
-                try:
-                    deadline = datetime.strptime(deadline_str, "%Y-%m-%d")
-                except ValueError:
-                    continue
+                rows = sheet.get_all_records()
+                headers = sheet.row_values(1)
 
-            if deadline < now:
-                status_col = headers.index("Статус") + 1
-                sheet.update_cell(i, status_col, "Просрочено")
+                for i, row in enumerate(rows, start=2):
+                    status = str(row.get("Статус", "")).strip()
+                    task = str(row.get("Задача", "")).strip()
+                    deadline_str = str(row.get("Дедлайн", "")).strip()
 
-                await context.bot.send_message(
-                    chat_id=MANAGER_ID,
-                    text=f"🚨 *Задача просрочена!*\n\n"
-                         f"👤 Сотрудник: {employee}\n"
-                         f"📌 Задача: {task}\n"
-                         f"⏰ Дедлайн был: {deadline_str}",
-                    parse_mode="Markdown"
-                )
+                    if status == "Выполнено" or status == "Просрочено" or not task or not deadline_str:
+                        continue
+
+                    try:
+                        deadline = datetime.strptime(deadline_str, "%Y-%m-%d %H:%M")
+                    except ValueError:
+                        try:
+                            deadline = datetime.strptime(deadline_str, "%Y-%m-%d")
+                        except ValueError:
+                            continue
+
+                    if deadline < now:
+                        status_col = headers.index("Статус") + 1
+                        sheet.update_cell(i, status_col, "Просрочено")
+                        await context.bot.send_message(
+                            chat_id=MANAGER_ID,
+                            text=f"🚨 *Задача просрочена!*\n\n"
+                                 f"👤 Сотрудник: {sheet_name}\n"
+                                 f"📌 Задача: {task}\n"
+                                 f"⏰ Дедлайн был: {deadline_str}",
+                            parse_mode="Markdown"
+                        )
+            except Exception as e:
+                logger.error(f"Ошибка проверки просрочек в вкладке {sheet_name}: {e}")
     except Exception as e:
         logger.error(f"Ошибка при проверке просрочек: {e}")
 
