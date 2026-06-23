@@ -60,7 +60,7 @@ def get_tasks_for_user(telegram_id):
     for name, sheet in get_all_employee_sheets():
         rows = sheet.get_all_records()
         for i, row in enumerate(rows, start=2):
-            if str(row.get("Telegram ID", "")) == str(telegram_id):
+            if str(row.get("Telegram ID", "")) == str(telegram_id) and str(row.get("Задача", "")).strip():
                 tasks.append({"row": i, "sheet_name": name, **row})
     return tasks
 
@@ -82,15 +82,11 @@ def save_telegram_id(code, telegram_id):
             rows = sheet.get_all_records()
             headers = sheet.row_values(1)
             telegram_id_col = headers.index("Telegram ID") + 1
-            # Ищем строку с этим кодом в колонке Сотрудник
-            for i, row in enumerate(rows, start=2):
-                if str(row.get("Сотрудник", "")).strip().lower() == code.lower():
-                    sheet.update_cell(i, telegram_id_col, str(telegram_id))
-                    return True
-            # Если строки с кодом нет — записываем ID во все строки вкладки
+            # Записываем ID во все строки вкладки где есть этот код
             updated = False
             for i, row in enumerate(rows, start=2):
-                if str(row.get("Задача", "")).strip():
+                employee = str(row.get("Сотрудник", "")).strip().lower()
+                if employee == code.lower() or not employee:
                     sheet.update_cell(i, telegram_id_col, str(telegram_id))
                     updated = True
             return updated
