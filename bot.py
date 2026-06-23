@@ -71,28 +71,32 @@ def mark_task_done(row_number, sheet_name=None):
     status_col = headers.index("Статус") + 1
     sheet.update_cell(row_number, status_col, "Выполнено")
 
-# Сохранить Telegram ID пользователя в таблицу
-def save_telegram_id(name, telegram_id):
-    try:
-        sheet = get_sheet(name)
-        rows = sheet.get_all_records()
-        headers = sheet.row_values(1)
-        telegram_id_col = headers.index("Telegram ID") + 1
-        # Записываем ID в первую строку с данными или создаём запись
-        if rows:
+# Сохранить Telegram ID по коду сотрудника (например Ратмила0265)
+def save_telegram_id(code, telegram_id):
+    code = code.strip()
+    for sheet_name, sheet in get_all_employee_sheets():
+        # Код должен начинаться с имени вкладки (Ратмила0265 -> вкладка Ратмила)
+        if not code.lower().startswith(sheet_name.lower()):
+            continue
+        try:
+            rows = sheet.get_all_records()
+            headers = sheet.row_values(1)
+            telegram_id_col = headers.index("Telegram ID") + 1
+            # Ищем строку с этим кодом в колонке Сотрудник
             for i, row in enumerate(rows, start=2):
-                if not row.get("Telegram ID"):
+                if str(row.get("Сотрудник", "")).strip().lower() == code.lower():
                     sheet.update_cell(i, telegram_id_col, str(telegram_id))
                     return True
-            # Все строки уже имеют ID, обновим первую
-            sheet.update_cell(2, telegram_id_col, str(telegram_id))
-            return True
-        else:
-            # Пустая вкладка — добавим строку с ID
-            sheet.append_row([name, "", "", "", "", str(telegram_id), ""])
-            return True
-    except Exception:
-        return False
+            # Если строки с кодом нет — записываем ID во все строки вкладки
+            updated = False
+            for i, row in enumerate(rows, start=2):
+                if str(row.get("Задача", "")).strip():
+                    sheet.update_cell(i, telegram_id_col, str(telegram_id))
+                    updated = True
+            return updated
+        except Exception:
+            continue
+    return False
 
 # === КОМАНДЫ БОТА ===
 
